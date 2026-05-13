@@ -486,7 +486,7 @@ custom:
     evening_push:
       name: "傍晚汇总"
       start: "17:05"
-      end: "17:45"                 # 目标 17:20，留出 GitHub Actions 延迟裕量
+      end: "17:45"                 # 目标 17:10，留出 GitHub Actions 延迟裕量
       # frequency_file: "xxx.txt"               # 关键词文件（可选，位于 config/custom/keyword/）
       # interests_file: "xxx.txt"                # AI 兴趣文件（可选，位于 config/custom/ai/）
       # filter_method: "keyword"                # 筛选策略（可选: keyword | ai，不填用全局 filter.method）
