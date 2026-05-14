@@ -8,7 +8,7 @@ on:
     #
     # 🔄 运行机制 / How it works:
     #    - 每个周期为 7 天，届时自动停止
-    #    - 运行 "Check In" 会重置周期（重新开始 7 天倒计时，而非累加）
+    #    - 运行 "Check In" 会重置周期（重新开始 7 天计时，而非累加）
     #    - Each cycle is 7 days, then auto-stops
     #    - "Check In" resets the cycle (restarts 7-day countdown, not cumulative)
     #
@@ -36,15 +36,19 @@ on:
     #   "30 0-14 * * *"  → 北京时间 8:00-22:00 每小时第30分钟 / Beijing 8am-10pm
     #
     # 当前配置：北京时间 08:30、11:50、17:10 推送
+    # 备用触发：08:45、12:05、17:25。GitHub Actions schedule 偶尔漏触发，用备用时间兜底。
     - cron: "30 0 * * *"
+    - cron: "45 0 * * *"
     - cron: "50 3 * * *"
+    - cron: "5 4 * * *"
     - cron: "10 9 * * *"
+    - cron: "25 9 * * *"
 
   workflow_dispatch:
 
 concurrency:
   group: crawler-${{ github.ref_name }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -96,6 +100,50 @@ jobs:
             fi
           fi
 
+      - name: Deduplicate Schedule Window
+        id: dedupe
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+          WORKFLOW_FILE="crawler.yml"
+          API_URL="repos/${{ github.repository }}/actions/workflows/$WORKFLOW_FILE/runs"
+          NOW_HM=$(TZ=Asia/Shanghai date +%H:%M)
+          TODAY=$(TZ=Asia/Shanghai date +%F)
+          RUN_ID="${{ github.run_id }}"
+
+          case "$NOW_HM" in
+            08:* ) WINDOW_START="08:15"; WINDOW_END="08:55"; WINDOW_NAME="早间推送" ;;
+            11:*|12:* ) WINDOW_START="11:35"; WINDOW_END="12:15"; WINDOW_NAME="午间推送" ;;
+            17:* ) WINDOW_START="17:05"; WINDOW_END="17:45"; WINDOW_NAME="傍晚汇总" ;;
+            * )
+              echo "当前北京时间 $NOW_HM 不属于推送窗口，继续运行用于静默采集。"
+              exit 0
+              ;;
+          esac
+
+          echo "检查 ${TODAY} ${WINDOW_NAME} 是否已经成功运行过..."
+
+          DUPLICATE_COUNT=$(gh api "$API_URL?per_page=50&event=schedule" \
+            --jq "[.workflow_runs[]
+              | select(.id != ($RUN_ID | tonumber))
+              | select(.conclusion == \"success\")
+              | select((.created_at | fromdateiso8601 + 28800 | strftime(\"%F\")) == \"$TODAY\")
+              | select((.created_at | fromdateiso8601 + 28800 | strftime(\"%H:%M\")) >= \"$WINDOW_START\")
+              | select((.created_at | fromdateiso8601 + 28800 | strftime(\"%H:%M\")) <= \"$WINDOW_END\")
+            ] | length")
+
+          if [ "$DUPLICATE_COUNT" -gt 0 ]; then
+            echo "${WINDOW_NAME} 今天已有成功运行，跳过备用触发以避免重复推送。"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "${WINDOW_NAME} 今天尚无成功运行，继续执行。"
+
 
       # --------------------------------------------------------------------------------
       # 🚦 TRAFFIC CONTROL / 流量控制
@@ -115,21 +163,21 @@ jobs:
       #     echo "▶️  Delay finished. Starting crawler..."
 
       - name: Set up Python
-        if: success()
+        if: success() && steps.dedupe.outputs.skip != 'true'
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Install uv
-        if: success()
+        if: success() && steps.dedupe.outputs.skip != 'true'
         uses: astral-sh/setup-uv@v7
 
       - name: Install dependencies
-        if: success()
+        if: success() && steps.dedupe.outputs.skip != 'true'
         run: uv sync --frozen --no-dev
 
       - name: Verify required files
-        if: success()
+        if: success() && steps.dedupe.outputs.skip != 'true'
         run: |
           if [ ! -f config/config.yaml ]; then
             echo "Error: Config missing"
@@ -137,7 +185,7 @@ jobs:
           fi
 
       - name: Run crawler
-        if: success()
+        if: success() && steps.dedupe.outputs.skip != 'true'
         env:
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
