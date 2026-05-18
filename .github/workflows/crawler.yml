@@ -2,57 +2,19 @@ name: Get Hot News
 
 on:
   schedule:
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # ⚠️ 试用版说明 / Trial Mode
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    #
-    # 🔄 运行机制 / How it works:
-    #    - 每个周期为 7 天，届时自动停止
-    #    - 运行 "Check In" 会重置周期（重新开始 7 天计时，而非累加）
-    #    - Each cycle is 7 days, then auto-stops
-    #    - "Check In" resets the cycle (restarts 7-day countdown, not cumulative)
-    #
-    # 💡 设计初衷 / Why this design:
-    #    如果 7 天都忘了签到，或许这些资讯对你来说并非刚需
-    #    适时的暂停，能帮你从信息流中抽离，给大脑留出喘息的空间
-    #    If you forget for 7 days, maybe you don't really need it
-    #    A timely pause helps you detach from the stream and gives your mind space
-    #
-    # 🙏 珍惜资源 / Respect shared resources:
-    #    GitHub Actions 是平台提供的公共资源，每次运行都会消耗算力
-    #    签到机制确保资源分配给真正需要的用户，感谢你的理解与配合
-    #    GitHub Actions is a shared public resource provided by the platform
-    #    Check-in ensures resources go to those who truly need it — thank you
-    #
-    # 🚀 长期使用请部署 Docker 版本 / For long-term use, deploy Docker version
-    #
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    #
-    # 📝 修改运行时间：GitHub Actions 使用 UTC 时间，北京时间需减 8 小时
-    # 📝 Change time: GitHub Actions uses UTC; Beijing time is UTC+8
-    #
-    # 示例 / Examples:
-    #   "15 * * * *"     → 每小时第15分钟 / minute 15 every hour
-    #   "30 0-14 * * *"  → 北京时间 8:00-22:00 每小时第30分钟 / Beijing 8am-10pm
-    #
-    # 当前配置：北京时间 08:30、11:50、17:10 推送
-    # 备用触发：08:45、12:05、17:25。GitHub Actions schedule 偶尔漏触发，用备用时间兜底。
+    # 北京时间 08:30 / 11:50 / 17:10（GitHub Actions 使用 UTC，需减 8 小时）
     - cron: "30 0 * * *"
-    - cron: "45 0 * * *"
     - cron: "50 3 * * *"
-    - cron: "5 4 * * *"
     - cron: "10 9 * * *"
-    - cron: "25 9 * * *"
 
   workflow_dispatch:
 
 concurrency:
   group: crawler-${{ github.ref_name }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
-  actions: write
 
 jobs:
   crawl:
@@ -66,118 +28,18 @@ jobs:
           fetch-depth: 1
           clean: true
 
-      - name: Check Expiration
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          WORKFLOW_FILE="crawler.yml"
-          API_URL="repos/${{ github.repository }}/actions/workflows/$WORKFLOW_FILE/runs"
-
-          TOTAL=$(gh api "$API_URL" --jq '.total_count')
-          if [ -z "$TOTAL" ] || [ "$TOTAL" -eq 0 ]; then
-            echo "No previous runs found, skipping expiration check"
-            exit 0
-          fi
-
-          LAST_PAGE=$(( (TOTAL + 99) / 100 ))
-          FIRST_RUN_DATE=$(gh api "$API_URL?per_page=100&page=$LAST_PAGE" --jq '.workflow_runs[-1].created_at')
-
-          if [ -n "$FIRST_RUN_DATE" ]; then
-            CURRENT_TIMESTAMP=$(date +%s)
-            FIRST_RUN_TIMESTAMP=$(date -d "$FIRST_RUN_DATE" +%s)
-            DIFF_SECONDS=$((CURRENT_TIMESTAMP - FIRST_RUN_TIMESTAMP))
-            LIMIT_SECONDS=604800
-
-            if [ $DIFF_SECONDS -gt $LIMIT_SECONDS ]; then
-              echo "⚠️ 试用期已结束，请运行 'Check In' 签到续期"
-              echo "⚠️ Trial expired. Run 'Check In' to renew."
-              gh workflow disable "$WORKFLOW_FILE"
-              exit 1
-            else
-              DAYS_LEFT=$(( (LIMIT_SECONDS - DIFF_SECONDS) / 86400 ))
-              echo "✅ 试用期剩余 ${DAYS_LEFT} 天，到期前请运行 'Check In' 签到续期"
-              echo "✅ Trial: ${DAYS_LEFT} days left. Run 'Check In' before expiry to renew."
-            fi
-          fi
-
-      - name: Deduplicate Schedule Window
-        id: dedupe
-        if: github.event_name == 'schedule'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-
-          WORKFLOW_FILE="crawler.yml"
-          API_URL="repos/${{ github.repository }}/actions/workflows/$WORKFLOW_FILE/runs"
-          NOW_HM=$(TZ=Asia/Shanghai date +%H:%M)
-          TODAY=$(TZ=Asia/Shanghai date +%F)
-          RUN_ID="${{ github.run_id }}"
-
-          case "$NOW_HM" in
-            08:* ) WINDOW_START="08:15"; WINDOW_END="08:55"; WINDOW_NAME="早间推送" ;;
-            11:*|12:* ) WINDOW_START="11:35"; WINDOW_END="12:15"; WINDOW_NAME="午间推送" ;;
-            17:* ) WINDOW_START="17:05"; WINDOW_END="17:45"; WINDOW_NAME="傍晚汇总" ;;
-            * )
-              echo "当前北京时间 $NOW_HM 不属于推送窗口，继续运行用于静默采集。"
-              exit 0
-              ;;
-          esac
-
-          echo "检查 ${TODAY} ${WINDOW_NAME} 是否已经成功运行过..."
-
-          DUPLICATE_COUNT=$(gh api "$API_URL?per_page=50&event=schedule" \
-            --jq "[.workflow_runs[]
-              | select(.id != ($RUN_ID | tonumber))
-              | select(.conclusion == \"success\")
-              | select((.created_at | fromdateiso8601 + 28800 | strftime(\"%F\")) == \"$TODAY\")
-              | select((.created_at | fromdateiso8601 + 28800 | strftime(\"%H:%M\")) >= \"$WINDOW_START\")
-              | select((.created_at | fromdateiso8601 + 28800 | strftime(\"%H:%M\")) <= \"$WINDOW_END\")
-            ] | length")
-
-          if [ "$DUPLICATE_COUNT" -gt 0 ]; then
-            echo "${WINDOW_NAME} 今天已有成功运行，跳过备用触发以避免重复推送。"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "${WINDOW_NAME} 今天尚无成功运行，继续执行。"
-
-
-      # --------------------------------------------------------------------------------
-      # 🚦 TRAFFIC CONTROL / 流量控制
-      # --------------------------------------------------------------------------------
-      # EN: Generates a random delay between 1 and 300 seconds (5 minutes).
-      #     Critical for load balancing.
-      #
-      # CN: 生成 1 到 300 秒（5分钟）之间的随机延迟。
-      #     这对负载均衡至关重要。
-      # - name: Random Delay (Traffic Control)
-      #   if: success()
-      #   run: |
-      #     echo "🎲 Traffic Control: Generating random delay..."
-      #     DELAY=$(( ( RANDOM % 300 )  + 1 ))
-      #     echo "⏸️  Sleeping for ${DELAY} seconds to spread the load..."
-      #     sleep ${DELAY}s
-      #     echo "▶️  Delay finished. Starting crawler..."
-
       - name: Set up Python
-        if: success() && steps.dedupe.outputs.skip != 'true'
         uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Install uv
-        if: success() && steps.dedupe.outputs.skip != 'true'
         uses: astral-sh/setup-uv@v7
 
       - name: Install dependencies
-        if: success() && steps.dedupe.outputs.skip != 'true'
         run: uv sync --frozen --no-dev
 
       - name: Verify required files
-        if: success() && steps.dedupe.outputs.skip != 'true'
         run: |
           if [ ! -f config/config.yaml ]; then
             echo "Error: Config missing"
@@ -185,7 +47,6 @@ jobs:
           fi
 
       - name: Run crawler
-        if: success() && steps.dedupe.outputs.skip != 'true'
         env:
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -203,15 +64,12 @@ jobs:
           NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
           BARK_URL: ${{ secrets.BARK_URL }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          # 通用Webhook配置
           GENERIC_WEBHOOK_URL: ${{ secrets.GENERIC_WEBHOOK_URL }}
           GENERIC_WEBHOOK_TEMPLATE: ${{ secrets.GENERIC_WEBHOOK_TEMPLATE }}
-          # AI 配置（ai_analysis 和 ai_translation 共享模型配置）
           AI_ANALYSIS_ENABLED: ${{ secrets.AI_ANALYSIS_ENABLED }}
           AI_API_KEY: ${{ secrets.AI_API_KEY }}
           AI_MODEL: ${{ secrets.AI_MODEL }}
           AI_API_BASE: ${{ secrets.AI_API_BASE }}
-          # 远程存储配置
           S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
           S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
           S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
